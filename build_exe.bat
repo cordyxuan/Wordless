@@ -30,6 +30,7 @@ pyinstaller ^
     --windowed ^
     --name "单词闪卡" ^
     --add-data "flashcard_words_sample.csv;." ^
+    --add-data "wordlists;wordlists" ^
     flashcard.py
 
 if errorlevel 1 (

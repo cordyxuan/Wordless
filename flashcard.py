@@ -3,6 +3,7 @@
 用法: python flashcard.py
 支持翻页笔 (PageDown/PageUp) 和鼠标点击操作
 
+内置单词表：放在 wordlists/ 目录下的 CSV 文件会自动出现在主界面
 文件格式 (CSV 或 TXT):
   英文单词,中文释义
   或: 英文单词[Tab]中文释义
@@ -21,6 +22,35 @@ def _resource(filename):
     return os.path.join(base, filename)
 
 
+def _load_csv(path):
+    """读取 CSV/TXT 单词文件，返回 [(word, meaning), ...]"""
+    cards = []
+    with open(path, encoding='utf-8-sig') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            sep = '\t' if '\t' in line else ','
+            parts = line.split(sep, 1)
+            if len(parts) == 2:
+                w, m = parts[0].strip(), parts[1].strip()
+                if w and m:
+                    cards.append((w, m))
+    return cards
+
+
+def _scan_wordlists():
+    """扫描 wordlists/ 目录，返回 {显示名: 文件路径}"""
+    folder = _resource('wordlists')
+    result = {}
+    if os.path.isdir(folder):
+        for fname in sorted(os.listdir(folder)):
+            if fname.lower().endswith(('.csv', '.txt')):
+                display = os.path.splitext(fname)[0]
+                result[display] = os.path.join(folder, fname)
+    return result
+
+
 class FlashcardApp:
     # ── 颜色主题 ──────────────────────────────────────────────
     BG       = '#1a1a2e'
@@ -29,6 +59,7 @@ class FlashcardApp:
     ANSWER   = '#e94560'
     BTN_BG   = '#0f3460'
     DIM      = '#555566'
+    HL       = '#e94560'   # 选中高亮
 
     def __init__(self):
         self.root = tk.Tk()
@@ -41,6 +72,7 @@ class FlashcardApp:
         self.idx     = 0
         self.flipped = False
         self.mode    = 'home'
+        self._loaded_name = ''   # 当前加载的单词表名称
 
         self._bind_keys()
         self._show_home()
@@ -50,28 +82,33 @@ class FlashcardApp:
     def _bind_keys(self):
         root = self.root
         root.bind('<Escape>',  self._esc)
-        root.bind('<F11>',     lambda e: root.attributes('-fullscreen',
-                               not root.attributes('-fullscreen')))
-        # 前进: 点击、空格、回车、翻页笔 PageDown / 右方向键
+        root.bind('<F11>',     lambda e: self._toggle_fullscreen())
         root.bind('<Button-1>', self._on_click)
         root.bind('<space>',    self._on_key)
         root.bind('<Return>',   self._on_key)
         root.bind('<Next>',     self._on_key)   # PageDown
         root.bind('<Right>',    self._on_key)
-        # 后退: 翻页笔 PageUp / 左方向键
         root.bind('<Prior>',    self._go_prev)  # PageUp
         root.bind('<Left>',     self._go_prev)
+
+    def _toggle_fullscreen(self):
+        fs = not self.root.attributes('-fullscreen')
+        self.root.attributes('-fullscreen', fs)
+        # 刷新全屏按钮文字（如果在主页）
+        if hasattr(self, '_fs_btn'):
+            self._fs_btn.config(text='退出全屏' if fs else '全屏')
 
     def _esc(self, _=None):
         if self.mode == 'study':
             self._show_home()
-        else:
+        elif self.root.attributes('-fullscreen'):
             self.root.attributes('-fullscreen', False)
+            if hasattr(self, '_fs_btn'):
+                self._fs_btn.config(text='全屏')
 
     def _on_click(self, event=None):
         if self.mode != 'study':
             return
-        # 忽略左上角主页按钮区域的点击（避免误触后仍触发翻牌）
         if event and event.x < 160 and event.y < 60:
             return
         self._advance()
@@ -97,38 +134,85 @@ class FlashcardApp:
         self._clear()
         self.root.configure(bg=self.BG)
 
+        # ── 全屏按钮（右上角）──
+        fs_text = '退出全屏' if self.root.attributes('-fullscreen') else '全屏'
+        self._fs_btn = self._btn(self.root, fs_text, self._toggle_fullscreen,
+                                 self.BTN_BG, font_size=14)
+        self._fs_btn.place(relx=1.0, x=-16, y=16, anchor=tk.NE)
+
+        # ── 标题区 ──
         center = tk.Frame(self.root, bg=self.BG)
-        center.place(relx=.5, rely=.46, anchor=tk.CENTER)
+        center.place(relx=.5, rely=.5, anchor=tk.CENTER)
 
         tk.Label(center, text='单词闪卡',
-                 font=('Microsoft YaHei', 56, 'bold'),
-                 bg=self.BG, fg=self.FG).pack(pady=(0, 6))
+                 font=('Microsoft YaHei', 48, 'bold'),
+                 bg=self.BG, fg=self.FG).pack(pady=(0, 4))
 
-        if self.cards:
-            tk.Label(center, text=f'已加载  {len(self.cards)}  个单词',
-                     font=('Microsoft YaHei', 20),
-                     bg=self.BG, fg=self.DIM).pack(pady=(0, 30))
+        if self._loaded_name:
+            tk.Label(center,
+                     text=f'已加载：{self._loaded_name}  （{len(self.cards)} 个单词）',
+                     font=('Microsoft YaHei', 17),
+                     bg=self.BG, fg=self.DIM).pack(pady=(0, 20))
         else:
-            tk.Label(center, text='请先导入单词文件',
-                     font=('Microsoft YaHei', 20),
-                     bg=self.BG, fg=self.DIM).pack(pady=(0, 30))
+            tk.Label(center, text='选择内置单词表，或导入自定义文件',
+                     font=('Microsoft YaHei', 17),
+                     bg=self.BG, fg=self.DIM).pack(pady=(0, 20))
 
+        # ── 内置单词表列表 ──
+        wordlists = _scan_wordlists()
+        if wordlists:
+            list_frame = tk.Frame(center, bg=self.BG)
+            list_frame.pack(pady=(0, 18))
+
+            tk.Label(list_frame, text='内置单词表',
+                     font=('Microsoft YaHei', 14),
+                     bg=self.BG, fg=self.DIM).pack(pady=(0, 8))
+
+            btn_row = tk.Frame(list_frame, bg=self.BG)
+            btn_row.pack()
+            for name, path in wordlists.items():
+                is_active = (name == self._loaded_name)
+                bg = self.HL if is_active else '#1e2d50'
+                fg = '#ffffff' if is_active else '#aaaacc'
+                b = tk.Button(btn_row, text=name,
+                              font=('Microsoft YaHei', 14),
+                              bg=bg, fg=fg,
+                              activebackground=self.HL, activeforeground='#fff',
+                              relief=tk.FLAT, bd=0,
+                              padx=18, pady=8,
+                              cursor='hand2',
+                              command=lambda p=path, n=name: self._load_builtin(p, n))
+                b.pack(side=tk.LEFT, padx=6)
+
+        # ── 操作按钮行 ──
         row = tk.Frame(center, bg=self.BG)
-        row.pack()
+        row.pack(pady=(4, 0))
 
-        self._btn(row, '导入单词', self._import, '#0f3460').pack(side=tk.LEFT, padx=12)
+        self._btn(row, '导入文件', self._import, self.BTN_BG,
+                  font_size=18).pack(side=tk.LEFT, padx=10)
         if self.cards:
-            self._btn(row, '开始学习', self._start, '#c0392b').pack(side=tk.LEFT, padx=12)
+            self._btn(row, '▶  开始学习', self._start, '#c0392b',
+                      font_size=18).pack(side=tk.LEFT, padx=10)
 
-        tk.Label(center,
-                 text='文件格式：每行  英文单词,中文释义  或  英文单词[Tab]中文释义',
-                 font=('Microsoft YaHei', 13),
-                 bg=self.BG, fg=self.DIM).pack(pady=(36, 0))
-
+        # ── 底部提示 ──
         tk.Label(self.root,
-                 text='ESC 返回 / F11 切换全屏',
+                 text='ESC 退出全屏 / F11 切换全屏',
                  font=('Microsoft YaHei', 12),
                  bg=self.BG, fg='#333344').place(relx=.5, rely=.96, anchor=tk.CENTER)
+
+    # ── 加载内置单词表 ─────────────────────────────────────────
+    def _load_builtin(self, path, name):
+        try:
+            cards = _load_csv(path)
+        except Exception as exc:
+            messagebox.showerror('读取失败', str(exc))
+            return
+        if not cards:
+            messagebox.showerror('格式错误', '未找到有效单词，请检查文件格式。')
+            return
+        self.cards = cards
+        self._loaded_name = name
+        self._show_home()
 
     # ── 导入文件 ──────────────────────────────────────────────
     def _import(self):
@@ -138,30 +222,17 @@ class FlashcardApp:
         )
         if not path:
             return
-
-        cards = []
         try:
-            with open(path, encoding='utf-8-sig') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith('#'):
-                        continue
-                    sep = '\t' if '\t' in line else ','
-                    parts = line.split(sep, 1)
-                    if len(parts) == 2:
-                        w, m = parts[0].strip(), parts[1].strip()
-                        if w and m:
-                            cards.append((w, m))
+            cards = _load_csv(path)
         except Exception as exc:
             messagebox.showerror('读取失败', str(exc))
             return
-
         if not cards:
             messagebox.showerror('格式错误',
                 '未找到有效单词。\n每行格式：英文单词,中文释义')
             return
-
         self.cards = cards
+        self._loaded_name = os.path.splitext(os.path.basename(path))[0]
         messagebox.showinfo('导入成功', f'成功导入 {len(cards)} 个单词！')
         self._show_home()
 
@@ -193,7 +264,6 @@ class FlashcardApp:
         card.place(relx=.5, rely=.5, anchor=tk.CENTER,
                    relwidth=.76, relheight=.64)
 
-        # 分隔线（默认隐藏）
         self._sep = tk.Frame(card, bg='#2a2a4a', height=2)
 
         self._word_lbl = tk.Label(card,
