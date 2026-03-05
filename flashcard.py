@@ -10,7 +10,15 @@
 
 import tkinter as tk
 import random
+import sys
+import os
 from tkinter import filedialog, messagebox
+
+
+def _resource(filename):
+    """支持 PyInstaller 打包后的资源路径"""
+    base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, filename)
 
 
 class FlashcardApp:
